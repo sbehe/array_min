@@ -1,30 +1,5 @@
 use array_min::avx512_min::*;
 
-fn find_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
-    if arr.is_empty() {
-        return None;
-    }
-    let (start_block, start_mask) = unsafe { compute_start_mask(start_index) };
-    let (end_block, end_mask) = unsafe { compute_end_mask(end_index) };
-    let (index, val) = unsafe { minindex_u16_flexible(arr.as_ptr(),
-                                    start_block, start_mask,
-                                    end_block, end_mask)};
-    Some((val,index))
-}
-pub fn scalar_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
-    if arr.is_empty() {
-        return None;
-    }
-    let mut min_val = u16::MAX;
-    let mut min_idx = 0;
-    for i in start_index..=end_index {
-        if arr[i] < min_val {
-            min_val = arr[i];
-            min_idx = i;
-        }
-    }
-    Some((min_val, min_idx))
-}
 fn main() {
     let a:[u16; 64] = [05, 13, 09, 44, 22, 08, 33, 07, 34, 15, 
                        13, 12, 11, 10, 20, 19, 18, 17, 16, 31,
