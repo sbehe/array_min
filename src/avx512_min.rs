@@ -108,18 +108,6 @@ unsafe fn dump_u16_128(label: &str, v: __m128i) {
     println!("{}: {:?}", label, arr);
 }
 
-#[cfg(feature = "trace")]
-macro_rules! trace_println {
-    ($($arg:tt)*) => {
-        println!($($arg)*);
-    };
-}
-
-#[cfg(not(feature = "trace"))]
-macro_rules! trace_println {
-    ($($arg:tt)*) => {};
-}
-
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn horizontal_reduce_min_u16(
     mut vmin: __m512i,
@@ -127,7 +115,7 @@ unsafe fn horizontal_reduce_min_u16(
 ) -> (usize, u16) {
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {println!("===== START REDUCTION =====");
     dump_u16_512("Initial vmin", vmin);
     dump_u16_512("Initial vidx", vidx);
@@ -143,7 +131,7 @@ unsafe fn horizontal_reduce_min_u16(
     let vidx_lo = _mm512_castsi512_si256(vidx);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {
     dump_u16_256("vmin_lo (512→256)", vmin_lo);
     dump_u16_256("vmin_hi (512→256)", vmin_hi);
@@ -151,14 +139,14 @@ unsafe fn horizontal_reduce_min_u16(
 
     let mask = _mm256_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT);
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     println!("Mask 512→256: {:016b}", mask);
 
     let mut vmin256 = _mm256_mask_mov_epi16(vmin_lo, mask, vmin_hi);
     let mut vidx256 = _mm256_mask_mov_epi16(vidx_lo, mask, vidx_hi);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_256("vmin after 512→256", vmin256);
     dump_u16_256("vidx after 512→256", vidx256);
     }
@@ -173,17 +161,18 @@ unsafe fn horizontal_reduce_min_u16(
     let vidx_lo = _mm256_castsi256_si128(vidx256);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("vmin_lo (256→128)", vmin_lo);
     dump_u16_128("vmin_hi (256→128)", vmin_hi);
     }
     let mask = _mm_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT);
+    #[cfg(feature = "trace_avx_search")]
     println!("Mask 256→128: {:08b}", mask);
 
     let mut vmin128 = _mm_mask_mov_epi16(vmin_lo, mask, vmin_hi);
     let mut vidx128 = _mm_mask_mov_epi16(vidx_lo, mask, vidx_hi);
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("vmin after 256→128", vmin128);
     dump_u16_128("vidx after 256→128", vidx128);
     }
@@ -192,7 +181,7 @@ unsafe fn horizontal_reduce_min_u16(
     // 128-bit lane reduction
     // =========================
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {println!("--- 8 → 4 reduction ---");
     dump_u16_128("before", vmin128);
     }
@@ -200,24 +189,24 @@ unsafe fn horizontal_reduce_min_u16(
     let tidx = _mm_srli_si128(vidx128, 8);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
     let mask = _mm_cmplt_epu16_mask(tval, vmin128);
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
     vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
     vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("after 8→4 vmin", vmin128);
     dump_u16_128("after 8→4 vidx", vidx128);
     }
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {println!("--- 4 → 2 reduction ---");
     dump_u16_128("before", vmin128);
     }
@@ -225,25 +214,25 @@ unsafe fn horizontal_reduce_min_u16(
     let tidx = _mm_srli_si128(vidx128, 4);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
     let mask = _mm_cmplt_epu16_mask(tval, vmin128);
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
     vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
     vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("after 4→2 vmin", vmin128);
     dump_u16_128("after 4→2 vidx", vidx128);
     }
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {println!("--- 2 → 1 reduction ---");
     dump_u16_128("before", vmin128);
     }
@@ -251,19 +240,19 @@ unsafe fn horizontal_reduce_min_u16(
     let tidx = _mm_srli_si128(vidx128, 2);
 
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
     let mask = _mm_cmplt_epu16_mask(tval, vmin128);
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
     vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
     vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
 
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("after 2→1 vmin", vmin128);
     dump_u16_128("after 2→1 vidx", vidx128);
     }
@@ -272,7 +261,7 @@ unsafe fn horizontal_reduce_min_u16(
     let min_idx = _mm_extract_epi16(vidx128, 0) as usize;
 
     
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {println!("FINAL min_val: {}", min_val);
     println!("FINAL min_idx: {}", min_idx);
     println!("===== END REDUCTION =====");
@@ -308,7 +297,7 @@ pub unsafe fn minindex_u16_flexible(
     end_block: usize,         // block index for end_mask
     end_mask: __mmask32       // mask for last block (or !0)
 ) -> (usize, u16) {
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     println!("masks are {:032b} {:032b}", start_mask, end_mask);
     let mut vmin = _mm512_set1_epi16(u16::MAX as i16);
     let mut vidx = _mm512_setzero_si512();
@@ -316,7 +305,7 @@ pub unsafe fn minindex_u16_flexible(
     let offsets: [i16; 32] = core::array::from_fn(|i| i as i16);
     let voff = unsafe { _mm512_loadu_si512(offsets.as_ptr() as *const _) };
 
-    #[cfg(feature = "trace")]
+    #[cfg(feature = "trace_avx_search")]
     {
         println!("--- Number of Blocks {} ---", end_block - start_block + 1);
         dump_u16_512("Current vmin before", vmin);
@@ -328,15 +317,15 @@ pub unsafe fn minindex_u16_flexible(
         let ptr = unsafe { array.add(i) };
 
         let mask = if block == start_block && block == end_block {
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "trace_avx_search")]
             println!("Using combined mask {:032b}", start_mask & end_mask);
             start_mask & end_mask
         } else if block == start_block {
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "trace_avx_search")]
             println!("Using start mask {:032b}", start_mask);
             start_mask
         } else if block == end_block {
-            #[cfg(feature = "trace")]
+            #[cfg(feature = "trace_avx_search")]
             println!("Using end mask {:032b}", end_mask);
             end_mask
         } else {
@@ -357,7 +346,7 @@ pub unsafe fn minindex_u16_flexible(
 
         vmin = _mm512_mask_mov_epi16(vmin, cmp_mask, v);
         vidx = _mm512_mask_mov_epi16(vidx, cmp_mask, idx);
-        #[cfg(feature = "trace")]
+        #[cfg(feature = "trace_avx_search")]
         {
             print!("After processing block {}: ", block);
             dump_u16_512("Updated vmin", vmin);
@@ -442,8 +431,10 @@ pub fn find_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u1
     }
 
     if std::is_x86_feature_detected!("avx512f")
-                        && std::is_x86_feature_detected!("avx512bw") {
+        && std::is_x86_feature_detected!("avx512bw") && arr.len() >= 32 {
 
+        #[cfg(feature = "trace")]
+        println!("Using AVX-512 min for range {}..={}", start_index, end_index);
         let (start_block, start_mask) = unsafe { compute_start_mask(start_index) };
         let (end_block, end_mask) = unsafe { compute_end_mask(end_index) };
         let (index, val) = unsafe { minindex_u16_flexible(arr.as_ptr(),
@@ -455,7 +446,9 @@ pub fn find_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u1
     }
 }
 
-pub fn scalar_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
+pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
+    #[cfg(feature = "trace")]
+    println!("Using scalar min for range {}..={}", start_index, end_index);
     if arr.is_empty() {
         return None;
     }
