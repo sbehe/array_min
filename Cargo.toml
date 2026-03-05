@@ -1,0 +1,16 @@
+[package]
+name = "array_min"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[dev-dependencies]
+rand = "0.8"
+
+[profile.release]
+codegen-units = 1
+lto = true
+
+[features]
+trace = []
