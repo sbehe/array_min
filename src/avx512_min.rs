@@ -299,9 +299,12 @@ pub unsafe fn minindex_u16_flexible(
 ) -> (usize, u16) {
     #[cfg(feature = "trace_avx_search")]
     println!("masks are {:032b} {:032b}", start_mask, end_mask);
+    // careful
     let mut vmin = _mm512_set1_epi16(u16::MAX as i16);
     let mut vidx = _mm512_setzero_si512();
 
+
+    // assign them statically
     let offsets: [i16; 32] = core::array::from_fn(|i| i as i16);
     let voff = unsafe { _mm512_loadu_si512(offsets.as_ptr() as *const _) };
 
@@ -312,6 +315,8 @@ pub unsafe fn minindex_u16_flexible(
         dump_u16_512("Current vidx before", vidx);
     }
 
+    // move the first and last block out of the loop
+    // move the rest of the loop code into an inline function
     for block in start_block..end_block + 1 {
         let i = block * 32;
         let ptr = unsafe { array.add(i) };
@@ -332,9 +337,13 @@ pub unsafe fn minindex_u16_flexible(
             u32::MAX as __mmask32
         };
 
-        let v = unsafe { _mm512_maskz_loadu_epi16(mask, ptr as *const _) };
+        // use un-masked mov, as we will compare masked
+        // vmovdqa
+        //_mm512_maskz_mov_epi64
+        let v: __m512i = unsafe { _mm512_load_si512( ptr as *const _) };
 
         let base = _mm512_set1_epi16(i as i16);
+        // add 32 to existing indices
         let idx = _mm512_add_epi16(base, voff);
 
         let cmp_mask = _mm512_mask_cmp_epu16_mask(
@@ -425,7 +434,7 @@ pub unsafe fn minindex_u16(array: *const u16, size: usize) -> (i32, u16) {
     (min_index, min_val)
 }
 
-pub fn find_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
+pub fn find_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
     if arr.is_empty() {
         return None;
     }
