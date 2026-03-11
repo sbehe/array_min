@@ -1,119 +1,47 @@
 use core::arch::x86_64::*;
-#[allow(unsafe_code)]
-/// Reduce a 512-bit vector (16 i32s) to scalar min
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn arraymin_reduce_u16(v: __m512i) -> u16 {
-    let mut tmp = [0u16; 32];
-    unsafe { _mm512_storeu_si512(tmp.as_mut_ptr() as *mut _, v) };
-    tmp.into_iter().min().unwrap()
+use core::arch::asm;
+
+#[inline(always)]
+pub fn compute_start(i: usize) -> (usize, __mmask32) {
+    let block = i >> 5;
+    let offset = i & 31;
+    let mask = (!0u32 << offset) as __mmask32;
+    (block, mask)
 }
 
-/// Find minimum value in arbitrary sized array
-#[target_feature(enable = "avx512f,avx512bw")]
-pub unsafe fn arraymin_u16(array: *const u16, size: usize) -> u16 {
-    if size == 0 {
-        return u16::MAX;
-    }
-
-    let mut i = 0;
-
-    let mut vmin = _mm512_set1_epi16(unsafe { *array } as i16);
-
-    while i + 32 <= size {
-        let v = unsafe { _mm512_loadu_si512(array.add(i) as *const _) };
-        vmin = _mm512_min_epu16(vmin, v);
-        i += 32;
-    }
-
-    let mut min_val = unsafe { arraymin_reduce_u16(vmin) };
-
-    while i < size {
-        min_val = min_val.min(unsafe { *array.add(i) });
-        i += 1;
-    }
-
-    min_val
-}
-
-/// Optimized version for exactly 128 elements
-#[target_feature(enable = "avx512f,avx512bw")]
-pub unsafe fn arraymin128_u16(array: *const u16) -> u16 {
-    let v0 = unsafe { _mm512_loadu_si512(array.add(0) as *const _) };
-    let v1 = unsafe { _mm512_loadu_si512(array.add(32) as *const _) };
-    let v2 = unsafe { _mm512_loadu_si512(array.add(64) as *const _) };
-    let v3 = unsafe { _mm512_loadu_si512(array.add(96) as *const _) };
-
-    let m0 = _mm512_min_epu16(v0, v1);
-    let m1 = _mm512_min_epu16(v2, v3);
-    let m = _mm512_min_epu16(m0, m1);
-
-    unsafe { arraymin_reduce_u16(m) }
-}
-
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn horizontal_reduce_min_u16_v1(
-    mut vmin: __m512i,
-    mut vidx: __m512i,
-) -> (usize, u16) {
-    // 512 → 256
-    let tval = _mm512_shuffle_i64x2(vmin, vmin, 0x4E);
-    let tidx = _mm512_shuffle_i64x2(vidx, vidx, 0x4E);
-    let mask = _mm512_cmp_epu16_mask(tval, vmin, _MM_CMPINT_LT);
-    vmin = _mm512_mask_mov_epi16(vmin, mask, tval);
-    vidx = _mm512_mask_mov_epi16(vidx, mask, tidx);
-
-    // 256 → 128
-    let tval = _mm512_shuffle_i64x2(vmin, vmin, 0xB1);
-    let tidx = _mm512_shuffle_i64x2(vidx, vidx, 0xB1);
-    let mask = _mm512_cmp_epu16_mask(tval, vmin, _MM_CMPINT_LT);
-    vmin = _mm512_mask_mov_epi16(vmin, mask, tval);
-    vidx = _mm512_mask_mov_epi16(vidx, mask, tidx);
-
-    // within lanes
-    let tval = _mm512_shuffle_epi32(vmin, 0x4E);
-    let tidx = _mm512_shuffle_epi32(vidx, 0x4E);
-    let mask = _mm512_cmp_epu16_mask(tval, vmin, _MM_CMPINT_LT);
-    vmin = _mm512_mask_mov_epi16(vmin, mask, tval);
-    vidx = _mm512_mask_mov_epi16(vidx, mask, tidx);
-
-    let tval = _mm512_shuffle_epi32(vmin, 0xB1);
-    let tidx = _mm512_shuffle_epi32(vidx, 0xB1);
-    let mask = _mm512_cmp_epu16_mask(tval, vmin, _MM_CMPINT_LT);
-    vmin = _mm512_mask_mov_epi16(vmin, mask, tval);
-    vidx = _mm512_mask_mov_epi16(vidx, mask, tidx);
-
-    let min_val = _mm_extract_epi16(_mm512_castsi512_si128(vmin), 0) as u16;
-    let min_index = _mm_extract_epi16(_mm512_castsi512_si128(vidx), 0) as usize;
-
-    (min_index, min_val)
+#[inline(always)]
+pub fn compute_end(j: usize) -> (usize, __mmask32) {
+    let block = j >> 5;
+    let offset = j & 31;
+    let mask = ((1u32 << (offset + 1)) - 1) as __mmask32;
+    (block, mask)
 }
 
 unsafe fn dump_u16_512(label: &str, v: __m512i) {
     let mut arr = [0u16; 32];
-    _mm512_storeu_si512(arr.as_mut_ptr() as *mut _, v);
+    unsafe { _mm512_storeu_si512(arr.as_mut_ptr() as *mut _, v) };
     println!("{}: {:?}", label, arr);
 }
 
 #[inline(always)]
 unsafe fn dump_u16_256(label: &str, v: __m256i) {
     let mut arr = [0u16; 16];
-    _mm256_storeu_si256(arr.as_mut_ptr() as *mut _, v);
+    unsafe { _mm256_storeu_si256(arr.as_mut_ptr() as *mut _, v) };
     println!("{}: {:?}", label, arr);
 }
 
 #[inline(always)]
 unsafe fn dump_u16_128(label: &str, v: __m128i) {
     let mut arr = [0u16; 8];
-    _mm_storeu_si128(arr.as_mut_ptr() as *mut _, v);
+    unsafe { _mm_storeu_si128(arr.as_mut_ptr() as *mut _, v) };
     println!("{}: {:?}", label, arr);
 }
 
 #[target_feature(enable = "avx512f,avx512bw")]
 unsafe fn horizontal_reduce_min_u16(
-    mut vmin: __m512i,
-    mut vidx: __m512i,
-) -> (usize, u16) {
-
+    vmin: __m512i,
+    vidx: __m512i,
+) -> (u16, usize) {
 
     #[cfg(feature = "trace_avx_search")]
     {println!("===== START REDUCTION =====");
@@ -137,13 +65,13 @@ unsafe fn horizontal_reduce_min_u16(
     dump_u16_256("vmin_hi (512→256)", vmin_hi);
     }
 
-    let mask = _mm256_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT);
+    let mask = unsafe { _mm256_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT) };
     
     #[cfg(feature = "trace_avx_search")]
     println!("Mask 512→256: {:016b}", mask);
 
-    let mut vmin256 = _mm256_mask_mov_epi16(vmin_lo, mask, vmin_hi);
-    let mut vidx256 = _mm256_mask_mov_epi16(vidx_lo, mask, vidx_hi);
+    let vmin256 = unsafe { _mm256_mask_mov_epi16(vmin_lo, mask, vmin_hi) };
+    let vidx256 = unsafe { _mm256_mask_mov_epi16(vidx_lo, mask, vidx_hi) };
 
 
     #[cfg(feature = "trace_avx_search")]
@@ -165,12 +93,12 @@ unsafe fn horizontal_reduce_min_u16(
     {dump_u16_128("vmin_lo (256→128)", vmin_lo);
     dump_u16_128("vmin_hi (256→128)", vmin_hi);
     }
-    let mask = _mm_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT);
+    let mask = unsafe { _mm_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT) };
     #[cfg(feature = "trace_avx_search")]
     println!("Mask 256→128: {:08b}", mask);
 
-    let mut vmin128 = _mm_mask_mov_epi16(vmin_lo, mask, vmin_hi);
-    let mut vidx128 = _mm_mask_mov_epi16(vidx_lo, mask, vidx_hi);
+    let mut vmin128 = unsafe { _mm_mask_mov_epi16(vmin_lo, mask, vmin_hi) };
+    let mut vidx128 = unsafe { _mm_mask_mov_epi16(vidx_lo, mask, vidx_hi) };
 
     #[cfg(feature = "trace_avx_search")]
     {dump_u16_128("vmin after 256→128", vmin128);
@@ -192,13 +120,13 @@ unsafe fn horizontal_reduce_min_u16(
     #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
-    let mask = _mm_cmplt_epu16_mask(tval, vmin128);
+    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
     
     #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
-    vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
-    vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
+    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
+    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
 
 
     #[cfg(feature = "trace_avx_search")]
@@ -217,13 +145,13 @@ unsafe fn horizontal_reduce_min_u16(
     #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
-    let mask = _mm_cmplt_epu16_mask(tval, vmin128);
+    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
     
     #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
-    vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
-    vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
+    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
+    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
 
 
     #[cfg(feature = "trace_avx_search")]
@@ -243,13 +171,13 @@ unsafe fn horizontal_reduce_min_u16(
     #[cfg(feature = "trace_avx_search")]
     dump_u16_128("shifted vals", tval);
 
-    let mask = _mm_cmplt_epu16_mask(tval, vmin128);
+    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
     
     #[cfg(feature = "trace_avx_search")]
     println!("mask: {:08b}", mask);
 
-    vmin128 = _mm_mask_mov_epi16(vmin128, mask, tval);
-    vidx128 = _mm_mask_mov_epi16(vidx128, mask, tidx);
+    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
+    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
 
     
     #[cfg(feature = "trace_avx_search")]
@@ -266,189 +194,12 @@ unsafe fn horizontal_reduce_min_u16(
     println!("FINAL min_idx: {}", min_idx);
     println!("===== END REDUCTION =====");
     }
-    (min_idx, min_val)
-}
-
-#[target_feature(enable = "avx512f,avx512bw")]
-pub fn compute_start_mask(i: usize) 
-    -> (usize, __mmask32)
-{
-    let start_block = i / 32;
-    let start_offset = i % 32;
-    let start_mask = (!0u32 << start_offset) as __mmask32;
-    (start_block, start_mask)
-}
-
-
-#[target_feature(enable = "avx512f,avx512bw")]
-pub fn compute_end_mask(j: usize) -> (usize, __mmask32) {
-    let end_block   = j / 32;
-    let end_offset   = j % 32;
-    let end_mask = ((1u64 << (end_offset + 1)) - 1) as __mmask32;
-
-    (end_block, end_mask)
-}
-
-#[target_feature(enable = "avx512f,avx512bw")]
-pub unsafe fn minindex_u16_flexible(
-    array: *const u16,
-    start_block: usize,      // block index for start_mask
-    start_mask: __mmask32,     // mask for first block (or !0)
-    end_block: usize,         // block index for end_mask
-    end_mask: __mmask32       // mask for last block (or !0)
-) -> (usize, u16) {
-    #[cfg(feature = "trace_avx_search")]
-    println!("masks are {:032b} {:032b}", start_mask, end_mask);
-    let mut vmin = _mm512_set1_epi16(u16::MAX as i16);
-    let mut vidx = _mm512_setzero_si512();
-
-    let offsets: [i16; 32] = core::array::from_fn(|i| i as i16);
-    let voff = unsafe { _mm512_loadu_si512(offsets.as_ptr() as *const _) };
-
-    #[cfg(feature = "trace_avx_search")]
-    {
-        println!("--- Number of Blocks {} ---", end_block - start_block + 1);
-        dump_u16_512("Current vmin before", vmin);
-        dump_u16_512("Current vidx before", vidx);
-    }
-
-    for block in start_block..end_block + 1 {
-        let i = block * 32;
-        let ptr = unsafe { array.add(i) };
-
-        let mask = if block == start_block && block == end_block {
-            #[cfg(feature = "trace_avx_search")]
-            println!("Using combined mask {:032b}", start_mask & end_mask);
-            start_mask & end_mask
-        } else if block == start_block {
-            #[cfg(feature = "trace_avx_search")]
-            println!("Using start mask {:032b}", start_mask);
-            start_mask
-        } else if block == end_block {
-            #[cfg(feature = "trace_avx_search")]
-            println!("Using end mask {:032b}", end_mask);
-            end_mask
-        } else {
-            u32::MAX as __mmask32
-        };
-
-        let v = unsafe { _mm512_maskz_loadu_epi16(mask, ptr as *const _) };
-
-        let base = _mm512_set1_epi16(i as i16);
-        let idx = _mm512_add_epi16(base, voff);
-
-        let cmp_mask = _mm512_mask_cmp_epu16_mask(
-            mask,
-            v,
-            vmin,
-            _MM_CMPINT_LT,
-        );
-
-        vmin = _mm512_mask_mov_epi16(vmin, cmp_mask, v);
-        vidx = _mm512_mask_mov_epi16(vidx, cmp_mask, idx);
-        #[cfg(feature = "trace_avx_search")]
-        {
-            print!("After processing block {}: ", block);
-            dump_u16_512("Updated vmin", vmin);
-            dump_u16_512("Updated vidx", vidx);
-        }
-    }
-
-    unsafe { horizontal_reduce_min_u16(vmin, vidx) }
-}
-
-
-#[target_feature(enable = "avx512f,avx512bw")]
-
-
-#[target_feature(enable = "avx512f,avx512bw")]
-pub unsafe fn minindex_u16(array: *const u16, size: usize) -> (i32, u16) {
-    if size == 0 {
-        return (-1, u16::MAX);
-    }
-
-    // running minima
-    let mut vmin = _mm512_set1_epi16(unsafe { *array } as i16);
-
-    // running indices (i16!)
-    let mut vidx = _mm512_set1_epi16(0);
-
-    // offsets 0..31 (i16)
-    let offsets: [i16; 32] = core::array::from_fn(|i| i as i16);
-    let voff = unsafe { _mm512_loadu_si512(offsets.as_ptr() as *const _) };
-
-    let mut i = 0;
-
-    while i + 32 <= size {
-        let ptr = unsafe { array.add(i) };
-
-        let v = unsafe { _mm512_loadu_si512(ptr as *const _) };
-
-        let base = _mm512_set1_epi16(i as i16);
-        let idx = _mm512_add_epi16(base, voff);
-
-        let mask = _mm512_cmp_epu16_mask(v, vmin, _MM_CMPINT_LT);  // Note: epu16 for unsigned
-
-        vmin = _mm512_mask_mov_epi16(vmin, mask, v);
-        vidx = _mm512_mask_mov_epi16(vidx, mask, idx);
-
-        i += 32;
-    }
-
-    // horizontal reduction (scalar)
-    let mut vals = [0u16; 32];
-    let mut inds = [0i16; 32];
-
-    unsafe { _mm512_storeu_si512(vals.as_mut_ptr() as *mut _, vmin) };
-    unsafe { _mm512_storeu_si512(inds.as_mut_ptr() as *mut _, vidx) };
-
-    let mut min_val = vals[0];
-    let mut min_index = inds[0] as i32;
-
-    for j in 1..32 {
-        if vals[j] < min_val {
-            min_val = vals[j];
-            min_index = inds[j] as i32;
-        }
-    }
-
-    // scalar tail
-    while i < size {
-        let val = unsafe { *array.add(i) };
-        if val < min_val {
-            min_val = val;
-            min_index = i as i32;
-        }
-        i += 1;
-    }
-
-    (min_index, min_val)
-}
-
-pub fn find_min(arr: &[u16], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
-    if arr.is_empty() {
-        return None;
-    }
-
-    if std::is_x86_feature_detected!("avx512f")
-        && std::is_x86_feature_detected!("avx512bw") && arr.len() >= 32 {
-
-        #[cfg(feature = "trace")]
-        println!("Using AVX-512 min for range {}..={}", start_index, end_index);
-        let (start_block, start_mask) = unsafe { compute_start_mask(start_index) };
-        let (end_block, end_mask) = unsafe { compute_end_mask(end_index) };
-        let (index, val) = unsafe { minindex_u16_flexible(arr.as_ptr(),
-                                        start_block, start_mask,
-                                        end_block, end_mask)};
-        Some((val,index))
-    } else {
-        scalar_min(arr, start_index, end_index)
-    }
+    (min_val, min_idx)
 }
 
 pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
-    #[cfg(feature = "trace")]
-    println!("Using scalar min for range {}..={}", start_index, end_index);
+    #[cfg(feature = "trace_avx_search")]
+    println!("Using scalar min for range {}..{}", start_index, end_index);
     if arr.is_empty() {
         return None;
     }
@@ -461,4 +212,253 @@ pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index:
         }
     }
     Some((min_val, min_idx))
+}
+
+
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn minindex_u16_specialized<const N: usize>(
+    arr: &[u16; N],
+    start: usize,
+    end: usize,
+) -> (u16, usize) {
+
+    assert!(N % 32 == 0);
+    assert!(start <= end);
+    assert!(end < N);
+
+    let (start_block, start_mask) = compute_start(start);
+    let (end_block, end_mask) = compute_end(end);
+
+    let blocks = end_block - start_block + 1;
+
+    let ptr = unsafe { arr.as_ptr().add(start_block * 32) };
+
+    let (val, idx) = match blocks {
+
+        1 => {
+            let mask = start_mask & end_mask;
+            unsafe { kernel_1(ptr, mask) }
+        }
+
+        _ => {
+            panic!("Not yet implemented: blocks = {}", blocks);
+        }
+    };
+
+    (val, idx + start_block * 32)
+}
+
+#[repr(align(64))]
+struct AlignedArray([u16; 32]);
+
+static INDEX_TABLE: AlignedArray = AlignedArray([
+    0,1,2,3,4,5,6,7,
+    8,9,10,11,12,13,14,15,
+    16,17,18,19,20,21,22,23,
+    24,25,26,27,28,29,30,31
+]);
+
+static INF_VEC: AlignedArray = AlignedArray([0xFFFF; 32]);
+
+
+#[cfg(feature = "trace_avx_search")]
+fn dump(label: &str, v: &[u16;32]) {
+    println!("{}: {:?}", label, v);
+}
+
+#[cfg(not(feature = "trace_avx_search"))]
+fn dump(_: &str, _: &[u16;32]) {}
+
+#[target_feature(enable="avx512f,avx512bw")]
+pub unsafe fn kernel_1(ptr: *const u16, mask: u32) -> (u16, usize) {
+
+    let mut stage0 = [0u16;32];
+    let mut stage1 = [0u16;32];
+    let mut stage2 = [0u16;32];
+    let mut stage3 = [0u16;32];
+    let mut stage4 = [0u16;32];
+    let mut stage5 = [0u16;32];
+    let mut stage6 = [0u16;32];
+    let mut stage7 = [0u16;32];
+    let mut stage8 = [0u16;32];
+    let mut stage9 = [0u16;32];
+    let mut stage10 = [0u16;32];
+    let mut stage11 = [0u16;32];
+    let mut stage12 = [0u16;32];
+    let mut stage13 = [0u16;32];
+    let mut stage14 = [0u16;32];
+    let mut stage15 = [0u16;32];
+    let mut stage16 = [0u16;32];
+    let mut stage17 = [0u16;32];
+
+    let val: u32;
+    let idx: u32;
+
+    unsafe { asm!(
+        // load mask
+        "kmovd k1, {mask:e}",
+
+        // masked load (zero masked lanes)
+        "vmovdqu16 zmm2{{k1}}{{z}}, [{ptr}]",
+
+        // load INF vector
+        "vmovdqu16 zmm0, [rip + {inf}]",
+
+        // set masked lanes = 0xFFFF
+        "vmovdqu16 zmm0{{k1}}, zmm2",
+
+        // load index vector
+        "vmovdqu16 zmm1, [rip + {index}]",
+
+
+        // init working vectors
+        "vmovdqa64 zmm4, zmm0",
+        "vmovdqa64 zmm5, zmm1",
+
+        // "vmovdqu16 [{dbg0}], zmm4",
+        // // initial index
+        // "vmovdqu16 [{dbg1}], zmm5",
+
+        // reduction step 1
+        "vshufi64x2 zmm6, zmm4, zmm4, 0x4E",
+        "vshufi64x2 zmm7, zmm5, zmm5, 0x4E",
+
+        // "vmovdqu16 [{dbg2}], zmm6",
+        // "vmovdqu16 [{dbg3}], zmm7",
+
+        "vpcmpuw k3, zmm6, zmm4, 1",
+
+        "vmovdqu16 zmm4{{k3}}, zmm6",
+        "vmovdqu16 zmm5{{k3}}, zmm7",
+
+        // dump index vector
+        // "vmovdqu16 [{dbg4}], zmm4",
+        // "vmovdqu16 [{dbg5}], zmm5",
+
+        // reduction step 2
+        "vshufi64x2 zmm6, zmm4, zmm4, 0xB1",
+        "vshufi64x2 zmm7, zmm5, zmm5, 0xB1",
+
+        //"vmovdqu16 [{dbg6}], zmm6",
+        //"vmovdqu16 [{dbg7}], zmm7",
+
+        "vpcmpuw k3, zmm6, zmm4, 1",
+
+        "vmovdqu16 zmm4{{k3}}, zmm6",
+        "vmovdqu16 zmm5{{k3}}, zmm7",
+
+         "vmovdqu16 [{dbg8}], zmm4",
+
+        // dump index vector
+        // "vmovdqu16 [{dbg9}], zmm5",
+
+        // reduction step 3
+        "vpshufd zmm6, zmm4, 0x4E",
+        "vpshufd zmm7, zmm5, 0x4E",
+
+        "vmovdqu16 [{dbg10}], zmm6",
+        "vmovdqu16 [{dbg11}], zmm7",
+
+        "vpcmpuw k3, zmm6, zmm4, 1",
+
+        "vmovdqu16 zmm4{{k3}}, zmm6",
+        "vmovdqu16 zmm5{{k3}}, zmm7",
+
+        "vmovdqu16 [{dbg12}], zmm4",
+
+        // dump index vector
+        "vmovdqu16 [{dbg13}], zmm5",
+
+        // reduction step 4
+        "vpshuflw zmm6, zmm4, 0x4E",
+        "vpshuflw zmm7, zmm5, 0x4E",
+
+        "vmovdqu16 [{dbg14}], zmm6",
+        "vmovdqu16 [{dbg15}], zmm7",
+
+        "vpcmpuw k3, zmm6, zmm4, 1",
+
+        "vmovdqu16 zmm4{{k3}}, zmm6",
+        "vmovdqu16 zmm5{{k3}}, zmm7",
+
+        "vmovdqu16 [{dbg16}], zmm4",
+
+        // dump index vector
+        "vmovdqu16 [{dbg17}], zmm5",
+
+        // reduction step 5
+        "vpshuflw zmm6, zmm4, 0xB1",
+        "vpshuflw zmm7, zmm5, 0xB1",
+
+        "vmovdqu16 [{dbg14}], zmm6",
+        "vmovdqu16 [{dbg15}], zmm7",
+
+        "vpcmpuw k3, zmm6, zmm4, 1",
+
+        "vmovdqu16 zmm4{{k3}}, zmm6",
+        "vmovdqu16 zmm5{{k3}}, zmm7",
+
+        "vmovdqu16 [{dbg16}], zmm4",
+
+        // dump index vector
+        "vmovdqu16 [{dbg17}], zmm5",
+
+        // extract result
+        "vpextrw {val:e}, xmm4, 0",
+        "vpextrw {idx:e}, xmm5, 0",
+
+        ptr = in(reg) ptr,
+        mask = in(reg) mask,
+        index = sym INDEX_TABLE,
+        inf = sym INF_VEC,
+
+        // dbg0 = in(reg) stage0.as_mut_ptr(),
+        // dbg1 = in(reg) stage1.as_mut_ptr(),
+        // dbg2 = in(reg) stage2.as_mut_ptr(),
+        // dbg3 = in(reg) stage3.as_mut_ptr(),
+        // dbg4 = in(reg) stage4.as_mut_ptr(),
+        // dbg5 = in(reg) stage5.as_mut_ptr(),
+        // dbg6 = in(reg) stage6.as_mut_ptr(),
+        // dbg7 = in(reg) stage7.as_mut_ptr(),
+         dbg8 = in(reg) stage8.as_mut_ptr(),
+        // dbg9 = in(reg) stage9.as_mut_ptr(),
+        dbg10 = in(reg) stage10.as_mut_ptr(),
+        dbg11 = in(reg) stage11.as_mut_ptr(),
+        dbg12 = in(reg) stage12.as_mut_ptr(),
+        dbg13 = in(reg) stage13.as_mut_ptr(),
+        dbg14 = in(reg) stage14.as_mut_ptr(),
+        dbg15 = in(reg) stage15.as_mut_ptr(),
+        dbg16 = in(reg) stage16.as_mut_ptr(),
+        dbg17 = in(reg) stage17.as_mut_ptr(),
+
+        val = out(reg) val,
+        idx = out(reg) idx,
+
+        out("zmm0") _, out("zmm1") _, out("zmm2") _,
+        out("zmm4") _, out("zmm5") _, out("zmm6") _, out("zmm7") _,
+        out("k1") _, out("k2") _, out("k3") _,
+
+        options(nostack)
+    ); }
+
+    //dump("initial values \t \t \t      ", &stage0);
+    //dump("initial index", &stage1);
+    //dump("value vector after shuffle.  - step 1", &stage2);
+    //dump("index vector after shuffle", &stage3);
+    //dump("value vector after reduction - step 1", &stage4);
+    //dump("index vector after reduction 1", &stage5);
+    //dump("value vector after shuffle.  - step 2", &stage6);
+    //dump("index vector after shuffle", &stage6);
+    dump("value vector after reduction - step 2", &stage8);
+    //dump("index vector after reduction 2", &stage9);
+    dump("value vector after shuffle.  - step 3", &stage10);
+    //dump("index vector after shuffle", &stage11);
+    dump("value vector after reduction - step 3", &stage12);
+    //dump("index vector after reduction 3", &stage13);
+    dump("value vector after shuffle.  - step 4", &stage14);
+    //dump("index vector after shuffle", &stage15);
+    dump("value vector after reduction - step 4", &stage16);
+    //dump("index vector after reduction 4", &stage17);
+
+    (val as u16, idx as usize)
 }
