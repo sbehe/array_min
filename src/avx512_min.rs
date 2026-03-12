@@ -1,252 +1,6 @@
 use core::arch::x86_64::*;
 use core::arch::asm;
 
-#[inline(always)]
-pub fn compute_start(i: usize) -> (usize, __mmask32) {
-    let block = i >> 5;
-    let offset = i & 31;
-    let mask = (!0u32 << offset) as __mmask32;
-    (block, mask)
-}
-
-#[inline(always)]
-pub fn compute_end(j: usize) -> (usize, __mmask32) {
-    let block = j >> 5;
-    let offset = j & 31;
-    let mask = ((1u32 << (offset + 1)) - 1) as __mmask32;
-    (block, mask)
-}
-
-unsafe fn dump_u16_512(label: &str, v: __m512i) {
-    let mut arr = [0u16; 32];
-    unsafe { _mm512_storeu_si512(arr.as_mut_ptr() as *mut _, v) };
-    println!("{}: {:?}", label, arr);
-}
-
-#[inline(always)]
-unsafe fn dump_u16_256(label: &str, v: __m256i) {
-    let mut arr = [0u16; 16];
-    unsafe { _mm256_storeu_si256(arr.as_mut_ptr() as *mut _, v) };
-    println!("{}: {:?}", label, arr);
-}
-
-#[inline(always)]
-unsafe fn dump_u16_128(label: &str, v: __m128i) {
-    let mut arr = [0u16; 8];
-    unsafe { _mm_storeu_si128(arr.as_mut_ptr() as *mut _, v) };
-    println!("{}: {:?}", label, arr);
-}
-
-#[target_feature(enable = "avx512f,avx512bw")]
-unsafe fn horizontal_reduce_min_u16(
-    vmin: __m512i,
-    vidx: __m512i,
-) -> (u16, usize) {
-
-    #[cfg(feature = "trace_avx_search")]
-    {println!("===== START REDUCTION =====");
-    dump_u16_512("Initial vmin", vmin);
-    dump_u16_512("Initial vidx", vidx);
-    }
-    // =========================
-    // 512 → 256
-    // =========================
-
-    let vmin_hi = _mm512_extracti64x4_epi64(vmin, 1);
-    let vidx_hi = _mm512_extracti64x4_epi64(vidx, 1);
-
-    let vmin_lo = _mm512_castsi512_si256(vmin);
-    let vidx_lo = _mm512_castsi512_si256(vidx);
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {
-    dump_u16_256("vmin_lo (512→256)", vmin_lo);
-    dump_u16_256("vmin_hi (512→256)", vmin_hi);
-    }
-
-    let mask = unsafe { _mm256_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT) };
-    
-    #[cfg(feature = "trace_avx_search")]
-    println!("Mask 512→256: {:016b}", mask);
-
-    let vmin256 = unsafe { _mm256_mask_mov_epi16(vmin_lo, mask, vmin_hi) };
-    let vidx256 = unsafe { _mm256_mask_mov_epi16(vidx_lo, mask, vidx_hi) };
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_256("vmin after 512→256", vmin256);
-    dump_u16_256("vidx after 512→256", vidx256);
-    }
-    // =========================
-    // 256 → 128
-    // =========================
-
-    let vmin_hi = _mm256_extracti128_si256(vmin256, 1);
-    let vidx_hi = _mm256_extracti128_si256(vidx256, 1);
-
-    let vmin_lo = _mm256_castsi256_si128(vmin256);
-    let vidx_lo = _mm256_castsi256_si128(vidx256);
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_128("vmin_lo (256→128)", vmin_lo);
-    dump_u16_128("vmin_hi (256→128)", vmin_hi);
-    }
-    let mask = unsafe { _mm_cmp_epu16_mask(vmin_hi, vmin_lo, _MM_CMPINT_LT) };
-    #[cfg(feature = "trace_avx_search")]
-    println!("Mask 256→128: {:08b}", mask);
-
-    let mut vmin128 = unsafe { _mm_mask_mov_epi16(vmin_lo, mask, vmin_hi) };
-    let mut vidx128 = unsafe { _mm_mask_mov_epi16(vidx_lo, mask, vidx_hi) };
-
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_128("vmin after 256→128", vmin128);
-    dump_u16_128("vidx after 256→128", vidx128);
-    }
-
-    // =========================
-    // 128-bit lane reduction
-    // =========================
-
-    #[cfg(feature = "trace_avx_search")]
-    {println!("--- 8 → 4 reduction ---");
-    dump_u16_128("before", vmin128);
-    }
-    let tval = _mm_srli_si128(vmin128, 8); // shift by 4 u16
-    let tidx = _mm_srli_si128(vidx128, 8);
-
-
-    #[cfg(feature = "trace_avx_search")]
-    dump_u16_128("shifted vals", tval);
-
-    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
-    
-    #[cfg(feature = "trace_avx_search")]
-    println!("mask: {:08b}", mask);
-
-    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
-    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_128("after 8→4 vmin", vmin128);
-    dump_u16_128("after 8→4 vidx", vidx128);
-    }
-
-    #[cfg(feature = "trace_avx_search")]
-    {println!("--- 4 → 2 reduction ---");
-    dump_u16_128("before", vmin128);
-    }
-    let tval = _mm_srli_si128(vmin128, 4); // shift by 2 u16
-    let tidx = _mm_srli_si128(vidx128, 4);
-
-
-    #[cfg(feature = "trace_avx_search")]
-    dump_u16_128("shifted vals", tval);
-
-    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
-    
-    #[cfg(feature = "trace_avx_search")]
-    println!("mask: {:08b}", mask);
-
-    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
-    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_128("after 4→2 vmin", vmin128);
-    dump_u16_128("after 4→2 vidx", vidx128);
-    }
-
-
-    #[cfg(feature = "trace_avx_search")]
-    {println!("--- 2 → 1 reduction ---");
-    dump_u16_128("before", vmin128);
-    }
-    let tval = _mm_srli_si128(vmin128, 2); // shift by 1 u16
-    let tidx = _mm_srli_si128(vidx128, 2);
-
-
-    #[cfg(feature = "trace_avx_search")]
-    dump_u16_128("shifted vals", tval);
-
-    let mask = unsafe { _mm_cmplt_epu16_mask(tval, vmin128) };
-    
-    #[cfg(feature = "trace_avx_search")]
-    println!("mask: {:08b}", mask);
-
-    vmin128 = unsafe { _mm_mask_mov_epi16(vmin128, mask, tval) };
-    vidx128 = unsafe { _mm_mask_mov_epi16(vidx128, mask, tidx) };
-
-    
-    #[cfg(feature = "trace_avx_search")]
-    {dump_u16_128("after 2→1 vmin", vmin128);
-    dump_u16_128("after 2→1 vidx", vidx128);
-    }
-
-    let min_val = _mm_extract_epi16(vmin128, 0) as u16;
-    let min_idx = _mm_extract_epi16(vidx128, 0) as usize;
-
-    
-    #[cfg(feature = "trace_avx_search")]
-    {println!("FINAL min_val: {}", min_val);
-    println!("FINAL min_idx: {}", min_idx);
-    println!("===== END REDUCTION =====");
-    }
-    (min_val, min_idx)
-}
-
-pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> Option<(u16, usize)> {
-    #[cfg(feature = "trace_avx_search")]
-    println!("Using scalar min for range {}..{}", start_index, end_index);
-    if arr.is_empty() {
-        return None;
-    }
-    let mut min_val = u16::MAX;
-    let mut min_idx = 0;
-    for i in start_index..=end_index {
-        if arr[i] < min_val {
-            min_val = arr[i];
-            min_idx = i;
-        }
-    }
-    Some((min_val, min_idx))
-}
-
-
-#[target_feature(enable = "avx512f,avx512bw")]
-pub unsafe fn minindex_u16_specialized<const N: usize>(
-    arr: &[u16; N],
-    start: usize,
-    end: usize,
-) -> (u16, usize) {
-
-    assert!(N % 32 == 0);
-    assert!(start <= end);
-    assert!(end < N);
-
-    let (start_block, start_mask) = compute_start(start);
-    let (end_block, end_mask) = compute_end(end);
-
-    let blocks = end_block - start_block + 1;
-
-    let ptr = unsafe { arr.as_ptr().add(start_block * 32) };
-
-    let (val, idx) = match blocks {
-
-        1 => {
-            let mask = start_mask & end_mask;
-            unsafe { kernel_1(ptr, mask) }
-        }
-
-        _ => {
-            panic!("Not yet implemented: blocks = {}", blocks);
-        }
-    };
-
-    (val, idx + start_block * 32)
-}
 
 #[repr(align(64))]
 struct AlignedArray([u16; 32]);
@@ -261,204 +15,381 @@ static INDEX_TABLE: AlignedArray = AlignedArray([
 static INF_VEC: AlignedArray = AlignedArray([0xFFFF; 32]);
 
 
-#[cfg(feature = "trace_avx_search")]
-fn dump(label: &str, v: &[u16;32]) {
-    println!("{}: {:?}", label, v);
+#[inline(always)]
+pub fn compute_start(i: usize) -> (usize, __mmask32) {
+    let block = i >> 5;
+    let offset = i & 31;
+    let mask = (!0u32 << offset) as __mmask32;
+    (block, mask)
 }
 
-#[cfg(not(feature = "trace_avx_search"))]
-fn dump(_: &str, _: &[u16;32]) {}
+#[inline(always)]
+pub fn compute_end(j: usize) -> (usize, __mmask32) {
+    let block = j >> 5;
+    let offset = j & 31;
+    let mask = ((1u64 << (offset + 1)) - 1) as u32 as __mmask32;
+    (block, mask)
+}
 
-#[target_feature(enable="avx512f,avx512bw")]
-pub unsafe fn kernel_1(ptr: *const u16, mask: u32) -> (u16, usize) {
+pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> (u16, usize) {
+    #[cfg(feature = "trace_avx_search")]
+    println!("Using scalar min for range {}..{}", start_index, end_index);
+    assert!(!arr.is_empty()); 
+    let mut min_val = u16::MAX;
+    let mut min_idx = 0;
+    for i in start_index..=end_index {
+        if arr[i] < min_val {
+            min_val = arr[i];
+            min_idx = i;
+        }
+    }
+    (min_val, min_idx)
+}
 
-    let mut stage0 = [0u16;32];
-    let mut stage1 = [0u16;32];
-    let mut stage2 = [0u16;32];
-    let mut stage3 = [0u16;32];
-    let mut stage4 = [0u16;32];
-    let mut stage5 = [0u16;32];
-    let mut stage6 = [0u16;32];
-    let mut stage7 = [0u16;32];
-    let mut stage8 = [0u16;32];
-    let mut stage9 = [0u16;32];
-    let mut stage10 = [0u16;32];
-    let mut stage11 = [0u16;32];
-    let mut stage12 = [0u16;32];
-    let mut stage13 = [0u16;32];
-    let mut stage14 = [0u16;32];
-    let mut stage15 = [0u16;32];
-    let mut stage16 = [0u16;32];
-    let mut stage17 = [0u16;32];
 
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn minindex_u16<const N: usize>(
+    arr: &[u16; N],
+    start: usize,
+    end: usize,
+) -> (u16, usize) {
+
+    assert!(N % 32 == 0);
+    assert!(start <= end);
+    assert!(end < N);
+
+    //println!("computing start mask");
+    let (start_block, start_mask) = compute_start(start);
+    //println!("computing end mask");
+    let (end_block, end_mask) = compute_end(end);
+
+    let blocks = end_block - start_block + 1;
+
+    let ptr = unsafe { arr.as_ptr().add(start_block * 32) };
+
+    let (val, idx) = {
+        
+        // no start mask and no end mask
+        if ((start % 32) == 0) && ((end % 32) == 31) {
+            
+            unsafe { kernel_many_unmasked(ptr, blocks) }
+        } else {
+            //println!("at least 1 mask present");
+            if blocks == 1 {
+                unsafe { kernel_1_masked(ptr, start_mask & end_mask) }
+            } else {
+                unsafe { kernel_many(ptr, blocks, start_mask, end_mask) }
+            }
+        }
+    };
+
+    (val, idx + start_block * 32)
+}
+
+
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn fold_1_block(
+    ptr: *const u16,
+    base_idx: u32,
+    zmm4: &mut __m512i,
+    zmm5: &mut __m512i,
+) {
+    unsafe { asm!(
+        "vmovdqu16 zmm6, [{ptr}]",
+
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm7, xmm0",
+        "vmovdqu16 zmm8, [rip + {index}]",
+        "vpaddw zmm7, zmm8, zmm7",
+
+        "vpcmpuw k1, zmm6, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm6",
+        "vmovdqu16 zmm5{{k1}}, zmm7",
+
+        ptr   = in(reg) ptr,
+        base  = in(reg) base_idx,
+        index = sym INDEX_TABLE,
+
+        inout("zmm4") *zmm4,
+        inout("zmm5") *zmm5,
+        out("xmm0") _,
+        out("zmm6") _, out("zmm7") _, out("zmm8") _,
+        out("k1") _,
+        options(nostack),
+    ); }
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn fold_4_blocks(
+    ptr: *const u16,
+    base_idx: u32,
+    zmm4: &mut __m512i,
+    zmm5: &mut __m512i,
+) {
+    unsafe { asm!(
+        "vmovdqu16 zmm6,  [{ptr}]",
+        "vmovdqu16 zmm8,  [{ptr} + 64]",
+        "vmovdqu16 zmm9,  [{ptr} + 128]",
+        "vmovdqu16 zmm10, [{ptr} + 192]",
+
+        "vmovdqu16 zmm11, [rip + {index}]",
+
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm2, xmm0",
+        "vpaddw zmm7, zmm11, zmm2",
+
+        "add {base:e}, 32",
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm2, xmm0",
+        "vpaddw zmm13, zmm11, zmm2",
+
+        "add {base:e}, 32",
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm2, xmm0",
+        "vpaddw zmm14, zmm11, zmm2",
+
+        "add {base:e}, 32",
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm2, xmm0",
+        "vpaddw zmm15, zmm11, zmm2",
+
+        "vpcmpuw k1, zmm8,  zmm6,  1",
+        "vmovdqu16 zmm6{{k1}},  zmm8",
+        "vmovdqu16 zmm7{{k1}},  zmm13",
+
+        "vpcmpuw k1, zmm10, zmm9,  1",
+        "vmovdqu16 zmm9{{k1}},  zmm10",
+        "vmovdqu16 zmm14{{k1}}, zmm15",
+
+        "vpcmpuw k1, zmm9,  zmm6,  1",
+        "vmovdqu16 zmm6{{k1}},  zmm9",
+        "vmovdqu16 zmm7{{k1}},  zmm14",
+
+        "vpcmpuw k1, zmm6, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm6",
+        "vmovdqu16 zmm5{{k1}}, zmm7",
+
+        ptr   = in(reg) ptr,
+        base  = inout(reg) base_idx => _,
+        index = sym INDEX_TABLE,
+
+        inout("zmm4") *zmm4,
+        inout("zmm5") *zmm5,
+        out("xmm0") _,
+        out("zmm2") _,
+        out("zmm6") _, out("zmm7") _,
+        out("zmm8") _, out("zmm9") _,
+        out("zmm10") _, out("zmm11") _,
+        out("zmm13") _, out("zmm14") _, out("zmm15") _,
+        out("k1") _,
+        options(nostack),
+    ); }
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn fold_1_block_masked(
+    ptr: *const u16,
+    mask: u32,
+    base_idx: u32,
+    zmm4: &mut __m512i,
+    zmm5: &mut __m512i,
+) {
+    unsafe { asm!(
+        "kmovd k2, {mask:e}",
+        "vmovdqu16 zmm6{{k2}}{{z}}, [{ptr}]",
+        "vmovdqu16 zmm8, [rip + {inf}]",
+        "vmovdqu16 zmm8{{k2}}, zmm6",
+
+        "vmovd xmm0, {base:e}",
+        "vpbroadcastw zmm7, xmm0",
+        "vmovdqu16 zmm9, [rip + {index}]",
+        "vpaddw zmm7, zmm9, zmm7",
+
+        "vpcmpuw k1, zmm8, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm8",
+        "vmovdqu16 zmm5{{k1}}, zmm7",
+
+        ptr   = in(reg) ptr,
+        mask  = in(reg) mask,
+        base  = in(reg) base_idx,
+        index = sym INDEX_TABLE,
+        inf   = sym INF_VEC,
+
+        inout("zmm4") *zmm4,
+        inout("zmm5") *zmm5,
+        out("xmm0") _,
+        out("zmm6") _, out("zmm7") _, out("zmm8") _, out("zmm9") _,
+        out("k1") _, out("k2") _,
+        options(nostack),
+    ); }
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+unsafe fn horizontal_reduce(zmm4: __m512i, zmm5: __m512i) -> (u16, usize) {
     let val: u32;
     let idx: u32;
+    unsafe {asm!(
+        "vshufi64x2 zmm2, zmm4, zmm4, 0x4E",
+        "vshufi64x2 zmm3, zmm5, zmm5, 0x4E",
+        "vpcmpuw k1, zmm2, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5{{k1}}, zmm3",
 
-    unsafe { asm!(
-        // load mask
-        "kmovd k1, {mask:e}",
+        "vshufi64x2 zmm2, zmm4, zmm4, 0xB1",
+        "vshufi64x2 zmm3, zmm5, zmm5, 0xB1",
+        "vpcmpuw k1, zmm2, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5{{k1}}, zmm3",
 
-        // masked load (zero masked lanes)
-        "vmovdqu16 zmm2{{k1}}{{z}}, [{ptr}]",
+        "vpshufd zmm2, zmm4, 0x4E",
+        "vpshufd zmm3, zmm5, 0x4E",
+        "vpcmpuw k1, zmm2, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5{{k1}}, zmm3",
 
-        // load INF vector
-        "vmovdqu16 zmm0, [rip + {inf}]",
+        "vpshuflw zmm2, zmm4, 0x4E",
+        "vpshuflw zmm3, zmm5, 0x4E",
+        "vpcmpuw k1, zmm2, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5{{k1}}, zmm3",
 
-        // set masked lanes = 0xFFFF
-        "vmovdqu16 zmm0{{k1}}, zmm2",
+        "vpshuflw zmm2, zmm4, 0xB1",
+        
+        "vpshuflw zmm3, zmm5, 0xB1",
+        "vpcmpuw k1, zmm2, zmm4, 1",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5{{k1}}, zmm3",
 
-        // load index vector
-        "vmovdqu16 zmm1, [rip + {index}]",
-
-
-        // init working vectors
-        "vmovdqa64 zmm4, zmm0",
-        "vmovdqa64 zmm5, zmm1",
-
-        // "vmovdqu16 [{dbg0}], zmm4",
-        // // initial index
-        // "vmovdqu16 [{dbg1}], zmm5",
-
-        // reduction step 1
-        "vshufi64x2 zmm6, zmm4, zmm4, 0x4E",
-        "vshufi64x2 zmm7, zmm5, zmm5, 0x4E",
-
-        // "vmovdqu16 [{dbg2}], zmm6",
-        // "vmovdqu16 [{dbg3}], zmm7",
-
-        "vpcmpuw k3, zmm6, zmm4, 1",
-
-        "vmovdqu16 zmm4{{k3}}, zmm6",
-        "vmovdqu16 zmm5{{k3}}, zmm7",
-
-        // dump index vector
-        // "vmovdqu16 [{dbg4}], zmm4",
-        // "vmovdqu16 [{dbg5}], zmm5",
-
-        // reduction step 2
-        "vshufi64x2 zmm6, zmm4, zmm4, 0xB1",
-        "vshufi64x2 zmm7, zmm5, zmm5, 0xB1",
-
-        //"vmovdqu16 [{dbg6}], zmm6",
-        //"vmovdqu16 [{dbg7}], zmm7",
-
-        "vpcmpuw k3, zmm6, zmm4, 1",
-
-        "vmovdqu16 zmm4{{k3}}, zmm6",
-        "vmovdqu16 zmm5{{k3}}, zmm7",
-
-         "vmovdqu16 [{dbg8}], zmm4",
-
-        // dump index vector
-        // "vmovdqu16 [{dbg9}], zmm5",
-
-        // reduction step 3
-        "vpshufd zmm6, zmm4, 0x4E",
-        "vpshufd zmm7, zmm5, 0x4E",
-
-        "vmovdqu16 [{dbg10}], zmm6",
-        "vmovdqu16 [{dbg11}], zmm7",
-
-        "vpcmpuw k3, zmm6, zmm4, 1",
-
-        "vmovdqu16 zmm4{{k3}}, zmm6",
-        "vmovdqu16 zmm5{{k3}}, zmm7",
-
-        "vmovdqu16 [{dbg12}], zmm4",
-
-        // dump index vector
-        "vmovdqu16 [{dbg13}], zmm5",
-
-        // reduction step 4
-        "vpshuflw zmm6, zmm4, 0x4E",
-        "vpshuflw zmm7, zmm5, 0x4E",
-
-        "vmovdqu16 [{dbg14}], zmm6",
-        "vmovdqu16 [{dbg15}], zmm7",
-
-        "vpcmpuw k3, zmm6, zmm4, 1",
-
-        "vmovdqu16 zmm4{{k3}}, zmm6",
-        "vmovdqu16 zmm5{{k3}}, zmm7",
-
-        "vmovdqu16 [{dbg16}], zmm4",
-
-        // dump index vector
-        "vmovdqu16 [{dbg17}], zmm5",
-
-        // reduction step 5
-        "vpshuflw zmm6, zmm4, 0xB1",
-        "vpshuflw zmm7, zmm5, 0xB1",
-
-        "vmovdqu16 [{dbg14}], zmm6",
-        "vmovdqu16 [{dbg15}], zmm7",
-
-        "vpcmpuw k3, zmm6, zmm4, 1",
-
-        "vmovdqu16 zmm4{{k3}}, zmm6",
-        "vmovdqu16 zmm5{{k3}}, zmm7",
-
-        "vmovdqu16 [{dbg16}], zmm4",
-
-        // dump index vector
-        "vmovdqu16 [{dbg17}], zmm5",
-
-        // extract result
         "vpextrw {val:e}, xmm4, 0",
         "vpextrw {idx:e}, xmm5, 0",
 
-        ptr = in(reg) ptr,
-        mask = in(reg) mask,
-        index = sym INDEX_TABLE,
-        inf = sym INF_VEC,
-
-        // dbg0 = in(reg) stage0.as_mut_ptr(),
-        // dbg1 = in(reg) stage1.as_mut_ptr(),
-        // dbg2 = in(reg) stage2.as_mut_ptr(),
-        // dbg3 = in(reg) stage3.as_mut_ptr(),
-        // dbg4 = in(reg) stage4.as_mut_ptr(),
-        // dbg5 = in(reg) stage5.as_mut_ptr(),
-        // dbg6 = in(reg) stage6.as_mut_ptr(),
-        // dbg7 = in(reg) stage7.as_mut_ptr(),
-         dbg8 = in(reg) stage8.as_mut_ptr(),
-        // dbg9 = in(reg) stage9.as_mut_ptr(),
-        dbg10 = in(reg) stage10.as_mut_ptr(),
-        dbg11 = in(reg) stage11.as_mut_ptr(),
-        dbg12 = in(reg) stage12.as_mut_ptr(),
-        dbg13 = in(reg) stage13.as_mut_ptr(),
-        dbg14 = in(reg) stage14.as_mut_ptr(),
-        dbg15 = in(reg) stage15.as_mut_ptr(),
-        dbg16 = in(reg) stage16.as_mut_ptr(),
-        dbg17 = in(reg) stage17.as_mut_ptr(),
-
+        inout("zmm4") zmm4 => _,
+        inout("zmm5") zmm5 => _,
+        out("zmm2") _, out("zmm3") _,
         val = out(reg) val,
         idx = out(reg) idx,
+        out("k1") _,
+        options(nostack),
+    ); }
+    (val as u16, idx as usize)
+}
+// ---- public kernels ------------------------------------------------------
 
-        out("zmm0") _, out("zmm1") _, out("zmm2") _,
-        out("zmm4") _, out("zmm5") _, out("zmm6") _, out("zmm7") _,
-        out("k1") _, out("k2") _, out("k3") _,
+#[target_feature(enable = "avx512f,avx512bw")]
+#[inline]
+pub unsafe fn kernel_many_unmasked(ptr: *const u16, num_blocks: usize) -> (u16, usize) {
+    debug_assert!(num_blocks >= 1);
 
-        options(nostack)
+    let (mut zmm4, mut zmm5): (__m512i, __m512i);
+    unsafe { asm!(
+        "vmovdqu16 zmm4, [{ptr}]",
+        "vmovdqu16 zmm5, [rip + {index}]",
+        ptr   = in(reg) ptr,
+        index = sym INDEX_TABLE,
+        out("zmm4") zmm4,
+        out("zmm5") zmm5,
+        options(nostack),
     ); }
 
-    //dump("initial values \t \t \t      ", &stage0);
-    //dump("initial index", &stage1);
-    //dump("value vector after shuffle.  - step 1", &stage2);
-    //dump("index vector after shuffle", &stage3);
-    //dump("value vector after reduction - step 1", &stage4);
-    //dump("index vector after reduction 1", &stage5);
-    //dump("value vector after shuffle.  - step 2", &stage6);
-    //dump("index vector after shuffle", &stage6);
-    dump("value vector after reduction - step 2", &stage8);
-    //dump("index vector after reduction 2", &stage9);
-    dump("value vector after shuffle.  - step 3", &stage10);
-    //dump("index vector after shuffle", &stage11);
-    dump("value vector after reduction - step 3", &stage12);
-    //dump("index vector after reduction 3", &stage13);
-    dump("value vector after shuffle.  - step 4", &stage14);
-    //dump("index vector after shuffle", &stage15);
-    dump("value vector after reduction - step 4", &stage16);
-    //dump("index vector after reduction 4", &stage17);
+    let mut block = 1usize;
+    let remaining = num_blocks - 1;
 
-    (val as u16, idx as usize)
+    let rem = remaining % 4;
+    for _ in 0..rem {
+        unsafe { fold_1_block(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        block += 1;
+    }
+
+    while block < num_blocks {
+        unsafe { fold_4_blocks(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        block += 4;
+    }
+
+    unsafe { horizontal_reduce(zmm4, zmm5)}
+}
+
+#[target_feature(enable = "avx512f,avx512bw")]
+pub unsafe fn kernel_many(
+    ptr: *const u16,       // points to start_block (already offset)
+    num_blocks: usize,     // total blocks including start and end
+    start_mask: u32,
+    end_mask: u32,
+) -> (u16, usize) {        // returned index is relative to ptr
+    debug_assert!(num_blocks >= 2);
+
+    let (mut zmm4, mut zmm5): (__m512i, __m512i);
+    unsafe { asm!(
+        "vmovdqu16 zmm4, [rip + {inf}]",
+        "vmovdqu16 zmm5, [rip + {index}]",
+        inf   = sym INF_VEC,
+        index = sym INDEX_TABLE,
+        out("zmm4") zmm4,
+        out("zmm5") zmm5,
+        options(nostack),
+    ); }
+
+    // start block: relative block 0, base_idx = 0
+    unsafe { fold_1_block_masked(ptr, start_mask, 0, &mut zmm4, &mut zmm5);}
+
+    // end block: relative block (num_blocks-1)
+    let end_rel = num_blocks - 1;
+    unsafe { fold_1_block_masked(
+        ptr.add(end_rel * 32),
+        end_mask,
+        (end_rel * 32) as u32,
+        &mut zmm4,
+        &mut zmm5,
+    );}
+
+    // middle blocks: 1 .. num_blocks-1 (exclusive), all unmasked
+    let mut block = 1usize;
+    let mid_count = end_rel - 1;   // = num_blocks - 2
+
+    let rem = mid_count % 4;
+    for _ in 0..rem {
+        unsafe { fold_1_block(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        block += 1;
+    }
+    while block < end_rel {
+        unsafe { fold_4_blocks(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        block += 4;
+    }
+
+    unsafe { horizontal_reduce(zmm4, zmm5)}
+}
+
+#[target_feature(enable="avx512f,avx512bw")]
+pub unsafe fn kernel_1_masked(ptr: *const u16, mask: u32) -> (u16, usize) {
+    let (zmm4, zmm5): (__m512i, __m512i);
+
+    unsafe { asm!(
+        "kmovd k1, {mask:e}",
+        "vmovdqu16 zmm2{{k1}}{{z}}, [{ptr}]",
+        "vmovdqu16 zmm4, [rip + {inf}]",
+        "vmovdqu16 zmm4{{k1}}, zmm2",
+        "vmovdqu16 zmm5, [rip + {index}]",
+
+        ptr   = in(reg) ptr,
+        mask  = in(reg) mask,
+        index = sym INDEX_TABLE,
+        inf   = sym INF_VEC,
+
+        out("zmm2") _,
+        out("k1") _,
+        out("zmm4") zmm4,
+        out("zmm5") zmm5,
+
+        options(nostack),
+    );}
+
+    // Debug: print the first 32 u16 lanes of zmm4 and zmm5
+    // let vals: [u16; 32] = std::mem::transmute(zmm4);
+    // let idxs: [u16; 32] = std::mem::transmute(zmm5);
+    // println!("zmm4 (vals): {:?}", &vals[..32]);
+    // println!("zmm5 (idxs): {:?}", &idxs[..32]);
+    unsafe {horizontal_reduce(zmm4, zmm5)}
 }
