@@ -16,30 +16,27 @@ static INF_VEC: AlignedArray = AlignedArray([0xFFFF; 32]);
 
 
 #[inline(always)]
-pub fn compute_start(i: usize) -> (usize, __mmask32) {
-    let block = i >> 5;
+pub fn compute_start(i: u16) -> (usize, __mmask32) {
+    let block = i as usize >> 5;
     let offset = i & 31;
     let mask = (!0u32 << offset) as __mmask32;
     (block, mask)
 }
 
 #[inline(always)]
-pub fn compute_end(j: usize) -> (usize, __mmask32) {
-    let block = j >> 5;
+pub fn compute_end(j: u16) -> (usize, __mmask32) {
+    let block = j as usize >> 5;
     let offset = j & 31;
     let mask = ((1u64 << (offset + 1)) - 1) as u32 as __mmask32;
     (block, mask)
 }
 
-pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index: usize) -> (u16, usize) {
-    #[cfg(feature = "trace_avx_search")]
-    println!("Using scalar min for range {}..{}", start_index, end_index);
-    assert!(!arr.is_empty()); 
+pub fn scalar_min(arr: &[u16], start_index: usize, end_index: usize) -> (u16, usize) {
     let mut min_val = u16::MAX;
     let mut min_idx = 0;
     for i in start_index..=end_index {
-        if arr[i] < min_val {
-            min_val = arr[i];
+        if arr[i as usize] < min_val {
+            min_val = arr[i as usize];
             min_idx = i;
         }
     }
@@ -50,13 +47,16 @@ pub fn scalar_min<const M: usize>(arr: &[u16; M], start_index: usize, end_index:
 #[target_feature(enable = "avx512f,avx512bw")]
 pub unsafe fn minindex_u16<const N: usize>(
     arr: &[u16; N],
-    start: usize,
-    end: usize,
-) -> (u16, usize) {
+    start: u16,
+    end: u16,
+) -> (u16, u16) {
+    debug_assert!(N % 32 == 0);
+    debug_assert!(start <= end);
+    debug_assert!((end as usize) < N);
 
-    assert!(N % 32 == 0);
-    assert!(start <= end);
-    assert!(end < N);
+    if start == end {
+        return (arr[start as usize], start);
+    }
 
     //println!("computing start mask");
     let (start_block, start_mask) = compute_start(start);
@@ -65,32 +65,33 @@ pub unsafe fn minindex_u16<const N: usize>(
 
     let blocks = end_block - start_block + 1;
 
-    let ptr = unsafe { arr.as_ptr().add(start_block * 32) };
+    //let ptr = unsafe { arr.as_ptr().add((start_block * 32) as usize) };
+
 
     let (val, idx) = {
         
         // no start mask and no end mask
-        if ((start % 32) == 0) && ((end % 32) == 31) {
+        // if ((start % 32) == 0) && ((end % 32) == 31) {
             
-            unsafe { kernel_many_unmasked(ptr, blocks) }
-        } else {
+        //     unsafe { kernel_many_unmasked(ptr, blocks) }
+        // } else {
             //println!("at least 1 mask present");
             if blocks == 1 {
-                unsafe { kernel_1_masked(ptr, start_mask & end_mask) }
+                unsafe { kernel_1_masked(&arr[start_block*32..(start_block+1)*32], start_mask & end_mask) }
             } else {
-                unsafe { kernel_many(ptr, blocks, start_mask, end_mask) }
+                unsafe { kernel_many(&arr[start_block*32..(end_block+1)*32], blocks, start_mask, end_mask) }
             }
-        }
+        //}
     };
 
-    (val, idx + start_block * 32)
+    (val, idx + start_block as u16 * 32)
 }
 
 
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
 unsafe fn fold_1_block(
-    ptr: *const u16,
+    ptr: &[u16],
     base_idx: u32,
     zmm4: &mut __m512i,
     zmm5: &mut __m512i,
@@ -107,7 +108,7 @@ unsafe fn fold_1_block(
         "vmovdqu16 zmm4{{k1}}, zmm6",
         "vmovdqu16 zmm5{{k1}}, zmm7",
 
-        ptr   = in(reg) ptr,
+        ptr   = in(reg) ptr.as_ptr(),
         base  = in(reg) base_idx,
         index = sym INDEX_TABLE,
 
@@ -123,7 +124,7 @@ unsafe fn fold_1_block(
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
 unsafe fn fold_4_blocks(
-    ptr: *const u16,
+    ptr: &[u16],
     base_idx: u32,
     zmm4: &mut __m512i,
     zmm5: &mut __m512i,
@@ -171,7 +172,7 @@ unsafe fn fold_4_blocks(
         "vmovdqu16 zmm4{{k1}}, zmm6",
         "vmovdqu16 zmm5{{k1}}, zmm7",
 
-        ptr   = in(reg) ptr,
+        ptr   = in(reg) ptr.as_ptr(),
         base  = inout(reg) base_idx => _,
         index = sym INDEX_TABLE,
 
@@ -191,7 +192,7 @@ unsafe fn fold_4_blocks(
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
 unsafe fn fold_1_block_masked(
-    ptr: *const u16,
+    ptr: &[u16],
     mask: u32,
     base_idx: u32,
     zmm4: &mut __m512i,
@@ -212,7 +213,7 @@ unsafe fn fold_1_block_masked(
         "vmovdqu16 zmm4{{k1}}, zmm8",
         "vmovdqu16 zmm5{{k1}}, zmm7",
 
-        ptr   = in(reg) ptr,
+        ptr   = in(reg) ptr.as_ptr(),
         mask  = in(reg) mask,
         base  = in(reg) base_idx,
         index = sym INDEX_TABLE,
@@ -229,7 +230,7 @@ unsafe fn fold_1_block_masked(
 
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
-unsafe fn horizontal_reduce(zmm4: __m512i, zmm5: __m512i) -> (u16, usize) {
+unsafe fn horizontal_reduce(zmm4: __m512i, zmm5: __m512i) -> (u16, u16) {
     let val: u32;
     let idx: u32;
     unsafe {asm!(
@@ -275,20 +276,20 @@ unsafe fn horizontal_reduce(zmm4: __m512i, zmm5: __m512i) -> (u16, usize) {
         out("k1") _,
         options(nostack),
     ); }
-    (val as u16, idx as usize)
+    (val as u16, idx as u16)
 }
 // ---- public kernels ------------------------------------------------------
 
 #[target_feature(enable = "avx512f,avx512bw")]
 #[inline]
-pub unsafe fn kernel_many_unmasked(ptr: *const u16, num_blocks: usize) -> (u16, usize) {
+pub unsafe fn kernel_many_unmasked(ptr: &[u16], num_blocks: usize) -> (u16, u16) {
     debug_assert!(num_blocks >= 1);
 
     let (mut zmm4, mut zmm5): (__m512i, __m512i);
     unsafe { asm!(
         "vmovdqu16 zmm4, [{ptr}]",
         "vmovdqu16 zmm5, [rip + {index}]",
-        ptr   = in(reg) ptr,
+        ptr   = in(reg) ptr.as_ptr(),
         index = sym INDEX_TABLE,
         out("zmm4") zmm4,
         out("zmm5") zmm5,
@@ -300,12 +301,12 @@ pub unsafe fn kernel_many_unmasked(ptr: *const u16, num_blocks: usize) -> (u16, 
 
     let rem = remaining % 4;
     for _ in 0..rem {
-        unsafe { fold_1_block(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        unsafe { fold_1_block(&ptr[(block * 32)..(block * 32 + 32)], (block * 32) as u32, &mut zmm4, &mut zmm5);}
         block += 1;
     }
 
     while block < num_blocks {
-        unsafe { fold_4_blocks(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        unsafe { fold_4_blocks(&ptr[(block * 32)..(block * 32 + 128)], (block * 32) as u32, &mut zmm4, &mut zmm5);}
         block += 4;
     }
 
@@ -314,11 +315,11 @@ pub unsafe fn kernel_many_unmasked(ptr: *const u16, num_blocks: usize) -> (u16, 
 
 #[target_feature(enable = "avx512f,avx512bw")]
 pub unsafe fn kernel_many(
-    ptr: *const u16,       // points to start_block (already offset)
+    ptr: &[u16],       // points to start_block (already offset)
     num_blocks: usize,     // total blocks including start and end
     start_mask: u32,
     end_mask: u32,
-) -> (u16, usize) {        // returned index is relative to ptr
+) -> (u16, u16) {        // returned index is relative to ptr
     debug_assert!(num_blocks >= 2);
 
     let (mut zmm4, mut zmm5): (__m512i, __m512i);
@@ -338,7 +339,7 @@ pub unsafe fn kernel_many(
     // end block: relative block (num_blocks-1)
     let end_rel = num_blocks - 1;
     unsafe { fold_1_block_masked(
-        ptr.add(end_rel * 32),
+        &ptr[(end_rel * 32)..(end_rel * 32 + 32)],
         end_mask,
         (end_rel * 32) as u32,
         &mut zmm4,
@@ -351,11 +352,11 @@ pub unsafe fn kernel_many(
 
     let rem = mid_count % 4;
     for _ in 0..rem {
-        unsafe { fold_1_block(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        unsafe { fold_1_block(&ptr[(block * 32)..(block * 32 + 32)], (block * 32) as u32, &mut zmm4, &mut zmm5);}
         block += 1;
     }
     while block < end_rel {
-        unsafe { fold_4_blocks(ptr.add(block * 32), (block * 32) as u32, &mut zmm4, &mut zmm5);}
+        unsafe { fold_4_blocks(&ptr[(block * 32)..(block * 32 + 128)], (block * 32) as u32, &mut zmm4, &mut zmm5);}
         block += 4;
     }
 
@@ -363,7 +364,7 @@ pub unsafe fn kernel_many(
 }
 
 #[target_feature(enable="avx512f,avx512bw")]
-pub unsafe fn kernel_1_masked(ptr: *const u16, mask: u32) -> (u16, usize) {
+pub unsafe fn kernel_1_masked(ptr: &[u16], mask: u32) -> (u16, u16) {
     let (zmm4, zmm5): (__m512i, __m512i);
 
     unsafe { asm!(
@@ -373,7 +374,7 @@ pub unsafe fn kernel_1_masked(ptr: *const u16, mask: u32) -> (u16, usize) {
         "vmovdqu16 zmm4{{k1}}, zmm2",
         "vmovdqu16 zmm5, [rip + {index}]",
 
-        ptr   = in(reg) ptr,
+        ptr   = in(reg) ptr.as_ptr(),
         mask  = in(reg) mask,
         index = sym INDEX_TABLE,
         inf   = sym INF_VEC,
