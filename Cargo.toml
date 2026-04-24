@@ -15,3 +15,10 @@ lto = true
 
 [features]
 trace_avx_search = []
+
+[[bench]]
+name = "bench"
+harness = false
+
+[build]
+rustflags = ["-C", "target-feature=+avx512f,+avx512bw"]
