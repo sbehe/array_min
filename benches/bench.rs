@@ -21,23 +21,21 @@ const SEED: u64 = 41;
 // RDTSC UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn rdtsc_start() -> u64 {
-    use core::arch::x86_64::{__cpuid, _rdtsc};
+    use core::arch::x86_64::_rdtsc;
 
-    unsafe { __cpuid(0) }; // serialize
+    unsafe { core::arch::asm!("lfence", options(nostack, preserves_flags)); }
     unsafe { _rdtsc() }
 }
 
-#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 unsafe fn rdtsc_end() -> u64 {
-    use core::arch::x86_64::{__cpuid, __rdtscp};
+    use core::arch::x86_64::__rdtscp;
 
     let mut aux = 0;
-    let t = unsafe { __rdtscp(&mut aux) }; // serialize + read
-    unsafe { __cpuid(0) }; // serialize
+    let t = unsafe { __rdtscp(&mut aux) };
+    unsafe { core::arch::asm!("lfence", options(nostack, preserves_flags)); }
     t
 }
 
@@ -217,6 +215,7 @@ fn main() {
             128 => benchmark_size::<128>(size),
             256 => benchmark_size::<256>(size),
             512 => benchmark_size::<512>(size),
+            1024 => benchmark_size::<1024>(size),
             _ => {
                 eprintln!("Unsupported size: {}", size);
                 continue;
