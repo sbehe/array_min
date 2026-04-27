@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
+cargo bench
+
 CSV_DIR="bench_results"
 
 FILES=(
