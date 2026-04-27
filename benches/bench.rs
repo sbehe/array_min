@@ -2,19 +2,21 @@
 // Compile with: RUSTFLAGS="-C target-cpu=native" cargo run --release --bin bench_min
 
 use array_min::avx512_min::*;
+use rand::distributions::uniform::SampleBorrow;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
-use std::hint::black_box;
 use std::fs;
+use std::hint::black_box;
 use std::io::{BufWriter, Write};
+use std::time::Instant;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-const ARRAY_SIZES: &[usize] = &[32, 64, 128, 256, 512, 1024];
+const ARRAY_SIZES: &[usize] = &[32, 64, 128, 256];
 const WARMUP_ITERS: usize = 2;
-const MEASURE_ITERS: usize = 8;
+const MEASURE_ITERS: usize = 10000;
 const SEED: u64 = 41;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -94,34 +96,26 @@ fn measure_range<const N: usize>(
     }
 
     // Measure scalar
-    let mut scalar_cycles_samples = Vec::with_capacity(MEASURE_ITERS);
     let mut scalar_val = 0u16;
 
+    let cyc0 = unsafe { rdtsc_start() };
     for _ in 0..MEASURE_ITERS {
-        let cyc0 = unsafe { rdtsc_start() };
         let (v, _) = scalar_min(black_box(array), black_box(start), black_box(end));
-        let cyc1 = unsafe { rdtsc_end() };
-
         scalar_val = black_box(v);
-        scalar_cycles_samples.push(cyc1.saturating_sub(cyc0));
     }
-
-    let scalar_cycles = median_u64(&mut scalar_cycles_samples);
+    let cyc1 = unsafe { rdtsc_end() };
+    let scalar_cycles = (cyc1 - cyc0) / (MEASURE_ITERS as u64);
 
     // Measure vector
-    let mut vector_cycles_samples = Vec::with_capacity(MEASURE_ITERS);
     let mut vector_val = 0u16;
 
+    let cyc0 = unsafe { rdtsc_start() };
     for _ in 0..MEASURE_ITERS {
-        let cyc0 = unsafe { rdtsc_start() };
         let (v, _) = unsafe { minindex_u16(black_box(array), black_box(start as u16), black_box(end as u16)) };
-        let cyc1 = unsafe { rdtsc_end() };
-
         vector_val = black_box(v);
-        vector_cycles_samples.push(cyc1.saturating_sub(cyc0));
     }
-
-    let vector_cycles = median_u64(&mut vector_cycles_samples);
+    let cyc1 = unsafe { rdtsc_end() };
+    let vector_cycles = (cyc1 - cyc0) / (MEASURE_ITERS as u64);
 
     BenchResult {
         start,
@@ -159,14 +153,14 @@ fn benchmark_size<const N: usize>(size: usize) -> std::io::Result<()> {
         "array_size,start,end,range_len,scalar_cycles,vector_cycles,scalar_val,vector_val,correct"
     )?;
 
-    let sample_rate = if size > 128 { 4 } else if size > 64 { 2 } else { 1 };
-    let mut count = 0usize;
+    // let sample_rate = if size > 128 { 4 } else if size > 64 { 2 } else { 1 };
+    let sample_rate = 1; // Test all pairs for now
     let mut mismatches = 0usize;
 
     // Sample pairs
     for start in (0..size).step_by(sample_rate) {
         for end in (start..size).step_by(sample_rate) {
-            eprintln!("  Testing ({}, {})...", start, end);
+            //eprintln!("  Testing ({}, {})...", start, end);
 
             let result = measure_range(&array, start, end);
 
@@ -187,8 +181,6 @@ fn benchmark_size<const N: usize>(size: usize) -> std::io::Result<()> {
                 result.vector_val,
                 result.correct as u8,
             )?;
-
-            count += 1;
         }
     }
 
@@ -203,6 +195,8 @@ fn benchmark_size<const N: usize>(size: usize) -> std::io::Result<()> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn main() {
+    let start = Instant::now();
+
     println!("Benchmark: scalar_min vs minindex_u16");
     println!("Warmup iters : {}", WARMUP_ITERS);
     println!("Measure iters: {}", MEASURE_ITERS);
@@ -228,4 +222,5 @@ fn main() {
     }
 
     println!("All done. CSVs in ./bench_results/");
+    println!("time taken: {} secs", start.elapsed().as_secs());
 }
