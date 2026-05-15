@@ -14,7 +14,7 @@ use std::time::Instant;
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-const ARRAY_SIZES: &[usize] = &[32, 64, 128, 256];
+const ARRAY_SIZES: &[usize] = &[256];
 const WARMUP_ITERS: usize = 2;
 const MEASURE_ITERS: usize = 10000;
 const SEED: u64 = 41;
@@ -84,8 +84,8 @@ struct BenchResult {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Measure a single (start, end) range pair
-fn measure_range<const N: usize>(
-    array: &[u16; N],
+fn measure_range(
+    array: &[u16; 256],
     start: usize,
     end: usize,
 ) -> BenchResult {
@@ -110,9 +110,9 @@ fn measure_range<const N: usize>(
     let mut vector_val = 0u16;
 
     let cyc0 = unsafe { rdtsc_start() };
-    for _ in 0..MEASURE_ITERS {
-        let (v, _) = unsafe { minindex_u16(black_box(array), black_box(start as u16), black_box(end as u16)) };
-        vector_val = black_box(v);
+        for _ in 0..MEASURE_ITERS {
+            let (v, _) = unsafe { minindex_u16(black_box(array), black_box(start as u16), black_box(end as u16)) };
+            vector_val = black_box(v);
     }
     let cyc1 = unsafe { rdtsc_end() };
     let vector_cycles = (cyc1 - cyc0) / (MEASURE_ITERS as u64);
@@ -133,12 +133,12 @@ fn measure_range<const N: usize>(
 // BENCHMARK RUNNER
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn benchmark_size<const N: usize>(size: usize) -> std::io::Result<()> {
+fn benchmark_size(size: usize) -> std::io::Result<()> {
     println!("=== array size {} ===", size);
 
     // Create shuffled array
     let mut rng = StdRng::seed_from_u64(SEED);
-    let mut array: [u16; N] = std::array::from_fn(|i| i as u16);
+    let mut array: [u16; 256] = std::array::from_fn(|i| i as u16);
     array.shuffle(&mut rng);
 
     // Setup output file
@@ -204,12 +204,7 @@ fn main() {
 
     for &size in ARRAY_SIZES {
         let result = match size {
-            32 => benchmark_size::<32>(size),
-            64 => benchmark_size::<64>(size),
-            128 => benchmark_size::<128>(size),
-            256 => benchmark_size::<256>(size),
-            512 => benchmark_size::<512>(size),
-            1024 => benchmark_size::<1024>(size),
+            256 => benchmark_size(size),
             _ => {
                 eprintln!("Unsupported size: {}", size);
                 continue;
